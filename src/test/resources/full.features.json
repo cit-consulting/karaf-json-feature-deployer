@@ -1,0 +1,31 @@
+{
+  "featuresRequirementsVersion": "1.0",
+  "repositories": [
+    "mvn:org.apache.cxf.karaf/apache-cxf/3.3.1/xml/features",
+    "mvn:org.apache.camel.karaf/apache-camel/2.18.5/xml/features",
+    "spring-legacy"
+  ],
+  "features": {
+    "root": [
+      {
+        "name": "transaction"
+      },
+      {
+        "name": "connector"
+      }
+    ],
+    "root/camel218": [
+      {
+        "name": "spring-dm"
+      },
+      {
+        "name": "camel-spring",
+        "version": "2.18.5"
+      },
+      {
+        "name": "camel-spring-dm",
+        "version": "2.18.5"
+      }
+    ]
+  }
+}
