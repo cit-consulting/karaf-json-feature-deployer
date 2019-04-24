@@ -67,6 +67,31 @@ final class FeaturesDescriptor {
         return Collections.unmodifiableMap(featuresRequirements);
     }
 
+    //TODO test
+    void ensureSatisfied(final Map<String, Set<String>> actualReqs) {
+        final Set<String> reqsDiff = new LinkedHashSet<>();
+        for (Map.Entry<String, Set<String>> requestedRegionToFeatures : featuresRequirements.entrySet()) {
+            final Set<String> actualRegionReqs = actualReqs.getOrDefault(requestedRegionToFeatures.getKey(), Collections.emptySet());
+            for (String featureReq : requestedRegionToFeatures.getValue()) {
+                final Requirement requested = parseRequirement(featureReq);
+                boolean found = false;
+                for (String actualReq : actualRegionReqs) {
+                    final Requirement actual = parseRequirement(actualReq);
+                    if (requested.isSatisfiedBy(actual)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    reqsDiff.add(featureReq);
+                }
+            }
+        }
+        if (!reqsDiff.isEmpty()) {
+            throw new IllegalStateException("Requirements no provisioned: " + reqsDiff);
+        }
+    }
+
     JSONObject toJson() {
         final JSONObject result = new JSONObject();
         result.put(FIELD_FEATURES_REQUIREMENTS_VERSION, "1.0");
@@ -120,5 +145,24 @@ final class FeaturesDescriptor {
                 "version=1,repos=" + repos +
                 ", featuresRequirements=" + featuresRequirements +
                 '}';
+    }
+
+    private Requirement parseRequirement(final String reqSpec) {
+        final String[] nameToVersion = reqSpec.split(VERSION_SEPARATOR, 2);
+        return new Requirement(nameToVersion[0], VersionRange.parseVersionRange(nameToVersion[1]));
+    }
+
+    private static class Requirement {
+        private final String name;
+        private final VersionRange version;
+
+        private Requirement(final String name, final VersionRange version) {
+            this.name = name;
+            this.version = version;
+        }
+
+        private boolean isSatisfiedBy(final Requirement actual) {
+            return name.equals(actual.name) && version.intersect(actual.version) != null;
+        }
     }
 }

@@ -23,6 +23,11 @@
         </developer>
     </developers>
 
+    <scm>
+        <connection>scm:git:https://github.com/cit-consulting/karaf-json-feature-deployer.git</connection>
+        <developerConnection>scm:git:https://github.com/cit-consulting/karaf-json-feature-deployer.git</developerConnection>
+    </scm>
+
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>1.8</maven.compiler.source>
@@ -44,6 +49,11 @@
         <dependency>
             <groupId>org.apache.karaf.features</groupId>
             <artifactId>org.apache.karaf.features.core</artifactId>
+            <version>${karaf.min.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.karaf.bundle</groupId>
+            <artifactId>org.apache.karaf.bundle.core</artifactId>
             <version>${karaf.min.version}</version>
         </dependency>
         <dependency>
@@ -116,6 +126,7 @@
                         <Private-Package>
                             ru.citc.karaf.deployer.feature.json.*,
                             org.apache.karaf.util;-split-package:=first,
+                            org.apache.karaf.util.tracker;-split-package:=first,
                             org.apache.felix.utils.version;-split-package:=first,
                             org.apache.felix.utils.properties;-split-package:=first,
                             org.json.simple.*
@@ -125,5 +136,18 @@
             </plugin>
         </plugins>
     </build>
+
+    <distributionManagement>
+        <repository>
+            <id>citc.opensource</id>
+            <name>CITC Main repo</name>
+            <url>https://maven1.citc.ru/content/repositories/citc-opensource</url>
+        </repository>
+        <snapshotRepository>
+            <id>citc.snapshots</id>
+            <name>CITC Main snapshots repo</name>
+            <url>https://maven1.citc.ru/content/repositories/citc-snapshot</url>
+        </snapshotRepository>
+    </distributionManagement>
 
 </project>

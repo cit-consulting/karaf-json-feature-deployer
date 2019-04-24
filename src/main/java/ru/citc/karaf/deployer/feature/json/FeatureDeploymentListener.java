@@ -1,6 +1,10 @@
 package ru.citc.karaf.deployer.feature.json;
 
 import org.apache.felix.fileinstall.ArtifactUrlTransformer;
+import org.apache.karaf.bundle.core.BundleState;
+import org.apache.karaf.bundle.core.BundleStateService;
+import org.apache.karaf.features.DeploymentEvent;
+import org.apache.karaf.features.DeploymentListener;
 import org.apache.karaf.features.FeaturesService;
 import org.apache.karaf.features.Repository;
 import org.json.simple.JSONObject;
@@ -31,16 +35,22 @@ import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
-final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleListener {
+final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleListener, BundleStateService, DeploymentListener {
     private static final String DESCRIPTOR_SUFFIX = ".features.json";
+    private static final long DEPLOYMEMNT_START_TIMEOUT = 15_000L;
+
     private final FeaturesService featuresService;
     private final BundleContext bundleContext;
-
     private final Logger logger = LoggerFactory.getLogger(getClass());
+    private final Map<Long, BundleState> states = new ConcurrentHashMap<>();
+    private final Object deploymentMutex = new Object();
+    private final Object deploymentStartMutex = new Object();
+    private volatile boolean deploymentStarted;
 
     FeatureDeploymentListener(final FeaturesService featuresService, final BundleContext bundleContext) {
         this.featuresService = featuresService;
@@ -48,6 +58,7 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
     }
 
     void start() {
+        featuresService.registerListener(this);
         bundleContext.addBundleListener(this);
         for (Bundle bundle : bundleContext.getBundles()) {
             if (bundle.getState() == Bundle.RESOLVED || bundle.getState() == Bundle.STARTING
@@ -59,9 +70,26 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
 
     void stop() {
         bundleContext.removeBundleListener(this);
+        featuresService.unregisterListener(this);
     }
 
-    public URL transform(final URL artifact) throws Exception {
+    @Override
+    public void deploymentEvent(final DeploymentEvent event) {
+        logger.debug("Feature deployment event: {}", event);
+        if (event == DeploymentEvent.DEPLOYMENT_FINISHED) {
+            synchronized (deploymentMutex) {
+                deploymentStarted = false;
+                deploymentMutex.notifyAll();
+            }
+        } else if (event == DeploymentEvent.DEPLOYMENT_STARTED) {
+            synchronized (deploymentStartMutex) {
+                deploymentStarted = true;
+                deploymentStartMutex.notifyAll();
+            }
+        }
+    }
+
+    public URL transform(final URL artifact) {
         try {
             return new URL(JsonFeatureURLHandler.PREFIX, null, artifact.toString());
         } catch (Exception e) {
@@ -71,14 +99,16 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
     }
 
     public void bundleChanged(final BundleEvent event) {
-        if (event.getType() != BundleEvent.RESOLVED
-                && event.getType() != BundleEvent.UNINSTALLED) {
+        final Bundle bundle = event.getBundle();
+        final long bundleId = bundle.getBundleId();
+        if (event.getType() != BundleEvent.RESOLVED && event.getType() != BundleEvent.UNINSTALLED
+                || bundleId == bundleContext.getBundle().getBundleId()) {
             return;
         }
-        final Bundle bundle = event.getBundle();
-        synchronized (logger) {
+
+        synchronized (deploymentMutex) {
             final File storedDescriptorFile = requireNonNull(
-                    bundleContext.getDataFile("bundle_" + bundle.getBundleId() + DESCRIPTOR_SUFFIX),
+                    bundleContext.getDataFile("bundle_" + bundleId + DESCRIPTOR_SUFFIX),
                     "OSGI file system required");
             final FeaturesDescriptor storedDescriptor;
             if (storedDescriptorFile.exists()) {
@@ -119,17 +149,17 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
                     }
                 }
             }
-            final FeaturesDescriptor newFeaturesDescriptor;
+            final FeaturesDescriptor actualDescriptor;
             if (event.getType() == BundleEvent.RESOLVED) {
                 final URL descriptorUrl = bundle.getResource(JsonFeatureURLHandler.JSON_FEATURE_DESCRIPTOR_PATH);
                 if (descriptorUrl == null) {
-                    newFeaturesDescriptor = null;
-                    logger.debug("JSON features descriptor not found. Skip bundle {}", bundle.getBundleId());
+                    actualDescriptor = null;
+                    logger.debug("JSON features descriptor not found in: {}", bundle);
                 } else {
                     try (Reader reader = new InputStreamReader(descriptorUrl.openStream(), StandardCharsets.UTF_8)) {
                         final JSONParser parser = new JSONParser();
-                        newFeaturesDescriptor = FeaturesDescriptor.fromJson((JSONObject) parser.parse(reader));
-                        for (String repository : newFeaturesDescriptor.getRepositories()) {
+                        actualDescriptor = FeaturesDescriptor.fromJson((JSONObject) parser.parse(reader));
+                        for (String repository : actualDescriptor.getRepositories()) {
                             final URI reposUri = toRepoUri(repository);
                             if (reposUri == null) {
                                 logger.warn("Can't resolve repo spec {}", reposUri);
@@ -137,7 +167,7 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
                                 hasChanges |= requiredReposUris.add(reposUri);
                             }
                         }
-                        for (Map.Entry<String, Set<String>> newFeatureToRegion : newFeaturesDescriptor.getRequirements().entrySet()) {
+                        for (Map.Entry<String, Set<String>> newFeatureToRegion : actualDescriptor.getRequirements().entrySet()) {
                             final Set<String> regionFeatures = featureReqs.computeIfAbsent(newFeatureToRegion.getKey(), key -> new LinkedHashSet<>());
                             hasChanges |= regionFeatures.addAll(newFeatureToRegion.getValue());
                         }
@@ -147,31 +177,75 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
                     }
                 }
             } else {
-                newFeaturesDescriptor = null;
+                states.remove(bundleId);
+                actualDescriptor = null;
             }
 
             try {
                 if (hasChanges) {
-                    featuresService.updateReposAndRequirements(requiredReposUris, featureReqs, EnumSet.noneOf(FeaturesService.Option.class));
-                } else {
-                    logger.debug("No actual changes in updated descriptor. Bundle id: {}", bundle.getBundleId());
-                }
-                if (newFeaturesDescriptor == null) {
-                    if (storedDescriptorFile.exists() && !storedDescriptorFile.delete()) {
-                        logger.warn("Can't delete old state descriptor file {}", storedDescriptorFile);
+                    logger.info("Request deployment for: {}", bundle);
+                    states.put(bundleId, BundleState.Starting);
+                    featuresService.updateReposAndRequirements(requiredReposUris, featureReqs,
+                            EnumSet.noneOf(FeaturesService.Option.class));
+                    //TODO Karaf 4.2.5 not throw exception on unsatisfied requirements nor start deployment process
+                    synchronized (deploymentStartMutex) {
+                        deploymentStartMutex.wait(DEPLOYMEMNT_START_TIMEOUT);
+                        if (deploymentStarted) {
+                            logger.debug("Deployment started for {}", bundle);
+                            deploymentMutex.wait();
+                        }
                     }
-                } else {
-                    try (Writer writer = new OutputStreamWriter(new FileOutputStream(storedDescriptorFile, false), StandardCharsets.UTF_8)) {
-                        newFeaturesDescriptor.toJson().writeJSONString(writer);
-                    } catch (IOException e) {
-                        logger.warn("Can't save new state descriptor {}", storedDescriptor, e);
+                    // Because Karaf does not throw any exception on resolution fail (why?) we needs to check actual
+                    // requirements
+                    if (actualDescriptor != null) {
+                        actualDescriptor.ensureSatisfied(featuresService.listRequirements());
+                        states.put(bundleId, BundleState.Active);
+                        logger.info("Feature deployment finished for: {}", bundle);
                     }
+
+                } else {
+                    logger.debug("No deployment required for: {}", bundle);
                 }
+                saveState(storedDescriptorFile, actualDescriptor);
             } catch (Exception e) {
-                logger.error("Fail when applying new feature requirements {}", featureReqs, e);
+                logger.error("Can't apply requirements for {}.", bundle, e);
                 if (event.getType() == BundleEvent.RESOLVED) {
-                    
+                    states.put(bundleId, BundleState.Failure);
                 }
+            }
+        }
+    }
+
+    public boolean canHandle(final File artifact) {
+        return artifact.getName().toLowerCase(Locale.ENGLISH).endsWith(DESCRIPTOR_SUFFIX);
+    }
+
+    @Override
+    public String getName() {
+        return "JSON Feature Deployer";
+    }
+
+    @Override
+    public String getDiag(final Bundle bundle) {
+        return "";
+    }
+
+    @Override
+    public BundleState getState(final Bundle bundle) {
+        return states.getOrDefault(bundle.getBundleId(), BundleState.Unknown);
+    }
+
+    private void saveState(final File descriptorFile, final FeaturesDescriptor actualDescriptor) {
+        if (actualDescriptor == null) {
+            if (descriptorFile.exists() && !descriptorFile.delete()) {
+                logger.warn("Can't delete old state descriptor file {}", descriptorFile);
+            }
+        } else {
+            try (Writer writer = new OutputStreamWriter(new FileOutputStream(descriptorFile, false),
+                    StandardCharsets.UTF_8)) {
+                actualDescriptor.toJson().writeJSONString(writer);
+            } catch (IOException e) {
+                logger.warn("Can't save new state descriptor {}", actualDescriptor, e);
             }
         }
     }
@@ -194,9 +268,5 @@ final class FeatureDeploymentListener implements ArtifactUrlTransformer, BundleL
             }
         }
         return repoUri;
-    }
-
-    public boolean canHandle(final File artifact) {
-        return artifact.getName().toLowerCase(Locale.ENGLISH).endsWith(DESCRIPTOR_SUFFIX);
     }
 }
