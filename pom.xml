@@ -4,7 +4,7 @@
 
     <groupId>ru.citc.karaf.deployer</groupId>
     <artifactId>json-feature-deployer</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1-SNAPSHOT</version>
 
     <packaging>bundle</packaging>
     <name>Deployer :: JSON Features</name>
@@ -24,7 +24,7 @@
     <scm>
         <connection>scm:git:https://github.com/cit-consulting/karaf-json-feature-deployer.git</connection>
         <developerConnection>scm:git:https://github.com/cit-consulting/karaf-json-feature-deployer.git</developerConnection>
-      <tag>json-feature-deployer-0.1.0</tag>
+      <tag>HEAD</tag>
   </scm>
 
     <properties>
